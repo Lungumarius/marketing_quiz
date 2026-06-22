@@ -235,6 +235,33 @@ async function extractPptxText(file) {
   return texts.join('\n\n');
 }
 
+function sanitizeJsonString(raw) {
+  let inside = false;
+  let result = '';
+  for (let i = 0; i < raw.length; i++) {
+    let c = raw[i];
+    if (c === '"' && (i === 0 || raw[i-1] !== '\\')) {
+      inside = !inside;
+    }
+    if (inside) {
+      if (c === '\n') {
+        result += '\\n';
+      } else if (c === '\r') {
+        result += '\\r';
+      } else if (c === '\t') {
+        result += '\\t';
+      } else if (c.charCodeAt(0) < 32) {
+        // Remove or ignore bad control characters below ASCII 32
+      } else {
+        result += c;
+      }
+    } else {
+      result += c;
+    }
+  }
+  return result;
+}
+
 async function generateQuestions(text, courseName, courseNum) {
   const prompt = `Ești un profesor universitar. Din textul de mai jos, generează exact 15 întrebări grilă pentru examen.
 
@@ -268,6 +295,7 @@ ${text.substring(0, 8000)}`;
   const data = await r.json();
   let responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   responseText = responseText.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+  responseText = sanitizeJsonString(responseText);
   return JSON.parse(responseText);
 }
 
@@ -337,16 +365,23 @@ async function startGeneration() {
       // 2. Generate questions via Gemini with Retry / Exponential Backoff
       addLog(`🤖 Generez întrebări cu Gemini AI...`);
       let questions = null;
-      let retries = 4;
+      let retries = 5; // Allow up to 5 retries for high traffic
       let delay = 10000; // start with 10s delay
       for (let attempt = 1; attempt <= retries; attempt++) {
         try {
           questions = await generateQuestions(text, fname, `c${startIdx + i + 1}`);
           break;
         } catch(err) {
-          const isRateLimit = err.status === 429 || err.message.toLowerCase().includes('limit') || err.message.toLowerCase().includes('too many');
-          if (isRateLimit && attempt < retries) {
-            addLog(`⏳ Limită rată atinsă (429). Reîncerc încercarea ${attempt}/${retries} în ${delay/1000}s...`, 'warn');
+          const isRetryable = err.status === 429 || err.status === 503 || err.status === 500 ||
+                              err.message.toLowerCase().includes('limit') || 
+                              err.message.toLowerCase().includes('too many') || 
+                              err.message.toLowerCase().includes('traffic') ||
+                              err.message.toLowerCase().includes('overloaded') ||
+                              err.message.toLowerCase().includes('quota') ||
+                              err.message.toLowerCase().includes('resource') ||
+                              err.message.toLowerCase().includes('exhausted');
+          if (isRetryable && attempt < retries) {
+            addLog(`⏳ Limită rată / Trafic intens atins (${err.status || 'API Error'}). Reîncerc încercarea ${attempt}/${retries} în ${delay/1000}s...`, 'warn');
             await new Promise(r => setTimeout(r, delay));
             delay *= 2; // exponential backoff
           } else {

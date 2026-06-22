@@ -11,6 +11,8 @@ Toate modificările structurale, funcționalitățile adăugate și problemele r
   - Buton discret de adăugare cursuri noi (`➕ Adaugă Cursuri`) vizibil pe toate materiile din cloud.
   - Formularul de upload se adaptează dinamic în mod editare (numele materiei devine blocat) când se adaugă fișiere adiționale la o materie existentă.
 - **Ignorare fișiere locale**: Fișierul `.gitignore` creat pentru a curăța repository-ul de metadate specifice macOS (`.DS_Store`).
+- **Sanitizare JSON (Control Characters Fix)**: Creat parser-ul client-side `sanitizeJsonString` care curăță newlines fizice și caractere de control nepermise în string-urile JSON din răspunsul Gemini, rezolvând eroarea "Bad control character in string literal".
+- **Retry extins la trafic intens (503/500/Overload)**: Extinsă logica de exponential backoff la 5 încercări pentru a acoperi și erorile de tip "High traffic for this model", "Service Unavailable" (503) sau "Internal Server Error" (500).
 
 ### Modificat
 - **Configurare Vercel simplificată**: Actualizat `vercel.json` pentru a elimina rewrite-ul către vechiul `quiz.html` (care a fost șters) și a lăsa Vercel să servească implicit `index.html`.
