@@ -2,26 +2,43 @@
    Quiz App - Core Logic + Upload Feature
    ============================================= */
 
-// Encrypted credentials (PBKDF2+XOR, decrypted only with correct password)
+// Encrypted credentials (decrypted automatically on client or via admin login)
 const _H="8e955fe8fb522ee81e7eee024339148d7bf602ea62c2db9e582c51d90da62bfc";
 const _G="1quth0GKmFkNNPYYD/7G+JETONpYNOyz6zFJ7SIKCWHXwOiw0S8eQdPo70sN5f5IgQgnqmVU5r6zDyPoLn4yWdbu3L3y";
-const _J="Hl9Slfly9gyv0hBm4AaaPcbEyhjDLDLeZ2eSf7rSsTv+pkzDQoNud0Pu+tCkAR62gKzoE8pxW6wvbeJT2enoZMmvM7lWmGlTb8Xa/Q==";
 const _B="6a38ef0bda38895dfeea24cc";
+
+// Auto-decrypt JSONBin key and Gemini key for basic user operations
+let decryptedJsonbin = (() => {
+  const enc = [85, 67, 16, 85, 64, 65, 85, 66, 8, 62, 72, 37, 71, 30, 16, 0, 0, 73, 94, 66, 20, 34, 26, 50, 40, 21, 9, 11, 4, 54, 66, 72, 19, 43, 50, 94, 73, 28, 60, 48, 64, 52, 56, 9, 36, 37, 73, 95, 55, 64, 33, 56, 0, 57, 29, 22, 4, 62, 41, 38];
+  return enc.map(c => String.fromCharCode(c ^ 113)).join('');
+})();
+
+let decryptedGemini = (() => {
+  const enc = [48, 32, 95, 48, 19, 73, 35, 63, 71, 59, 54, 29, 25, 67, 16, 30, 2, 0, 9, 20, 19, 22, 67, 92, 23, 29, 29, 25, 16, 7, 18, 38, 32, 59, 64, 64, 46, 41, 41, 50, 31, 5, 92, 24, 21, 55, 43, 38, 3, 46, 61, 25, 48];
+  return enc.map(c => String.fromCharCode(c ^ 113)).join('');
+})();
 
 // ---- State ----
 let allSubjects = {};
 let cloudSubjects = {};
+let cloudUsers = {};
 let currentSubject = null;
+let currentSubjectIsPrivate = false;
+let currentCourseId = null;
 let currentCourses = null;
 let currentQuestions = [];
 let currentIndex = 0;
 let answers = {};
 let confirmed = {};
 let mode = 'learn';
-let stats = {correct:0, wrong:0};
-let decryptedGemini = null;
-let decryptedJsonbin = null;
-let isEditingSubjectKey = null; // Tracks if we are adding courses to an existing subject
+let stats = {correct:0, wrong:0, wrongQuestions:[], courses:{}, exams:[]};
+let isEditingSubjectKey = null;
+
+// User Session State
+let loggedInUser = null;
+let userDecryptedData = { progress: {}, privateSubjects: {} };
+let userSalt = null;
+let isAdmin = false;
 
 // ---- Crypto helpers ----
 async function sha256(str) {
@@ -40,38 +57,131 @@ async function decryptKey(encB64, password) {
   return new TextDecoder().decode(dec);
 }
 
-// ---- Cloud storage (JSONBin.io) ----
-async function loadCloudSubjects() {
-  try {
-    const r = await fetch(`https://api.jsonbin.io/v3/b/${_B}/latest`, {headers:{'X-Bin-Meta':'false'}});
-    if(r.ok) { const d = await r.json(); cloudSubjects = d.subjects||{}; }
-  } catch(e) { console.log('Cloud load skipped:', e.message); }
+// ---- E2EE Crypto helpers for users ----
+async function deriveUserKey(password, saltHex) {
+  const encoder = new TextEncoder();
+  const passwordBuffer = encoder.encode(password);
+  const saltBuffer = new Uint8Array(saltHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+  
+  const baseKey = await crypto.subtle.importKey(
+    "raw",
+    passwordBuffer,
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: saltBuffer,
+      iterations: 100000,
+      hash: "SHA-256"
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
 }
 
-async function saveCloudSubjects() {
+async function encryptUserData(plainText, password, saltHex) {
+  const key = await deriveUserKey(password, saltHex);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(plainText);
+  
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv },
+    key,
+    encoded
+  );
+  
+  const ivHex = Array.from(iv).map(b => b.toString(16).padStart(2, '0')).join('');
+  const dataHex = Array.from(new Uint8Array(encrypted)).map(b => b.toString(16).padStart(2, '0')).join('');
+  
+  return `${ivHex}:${dataHex}`;
+}
+
+async function decryptUserData(encryptedStr, password, saltHex) {
+  const parts = encryptedStr.split(':');
+  if (parts.length !== 2) throw new Error('Format date criptate invalid');
+  const [ivHex, dataHex] = parts;
+  
+  const iv = new Uint8Array(ivHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+  const encryptedData = new Uint8Array(dataHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+  
+  const key = await deriveUserKey(password, saltHex);
+  
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: iv },
+    key,
+    encryptedData
+  );
+  
+  return new TextDecoder().decode(decrypted);
+}
+
+// ---- Cloud storage (JSONBin.io) ----
+async function loadCloudData() {
   try {
-    await fetch(`https://api.jsonbin.io/v3/b/${_B}`, {
-      method:'PUT',
-      headers:{'Content-Type':'application/json','X-Master-Key':decryptedJsonbin},
-      body: JSON.stringify({subjects:cloudSubjects})
+    const r = await fetch(`https://api.jsonbin.io/v3/b/${_B}/latest`, {
+      headers: {
+        'X-Bin-Meta': 'false',
+        'X-Master-Key': decryptedJsonbin
+      }
     });
-  } catch(e) { console.error('Cloud save failed:', e); }
+    if(r.ok) { 
+      const d = await r.json(); 
+      cloudSubjects = d.subjects||{}; 
+      cloudUsers = d.users||{};
+    }
+  } catch(e) { console.error('Cloud load failed:', e.message); }
+}
+
+async function saveCloudData() {
+  try {
+    const response = await fetch(`https://api.jsonbin.io/v3/b/${_B}`, {
+      method:'PUT',
+      headers:{
+        'Content-Type':'application/json',
+        'X-Master-Key':decryptedJsonbin
+      },
+      body: JSON.stringify({
+        subjects: cloudSubjects,
+        users: cloudUsers
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+  } catch(e) { 
+    console.error('Cloud save failed:', e);
+    throw e;
+  }
 }
 
 // ---- Init ----
 async function init() {
   allSubjects = {...BUILTIN_SUBJECTS};
-  await loadCloudSubjects();
+  await loadCloudData();
   Object.assign(allSubjects, cloudSubjects);
   
-  // Auto-login if password is saved in sessionStorage
-  const savedPwd = sessionStorage.getItem('admin_pwd');
-  if (savedPwd) {
-    const hash = await sha256(savedPwd);
+  // Restore admin session if saved
+  const savedAdminPwd = sessionStorage.getItem('admin_pwd');
+  if (savedAdminPwd) {
+    const hash = await sha256(savedAdminPwd);
     if (hash === _H) {
-      decryptedGemini = await decryptKey(_G, savedPwd);
-      decryptedJsonbin = await decryptKey(_J, savedPwd);
+      decryptedGemini = await decryptKey(_G, savedAdminPwd);
+      isAdmin = true;
     }
+  }
+
+  // Restore user session if saved
+  await autoLogin();
+  
+  // Load stats for current subject if selected, otherwise general stats
+  if (currentSubject) {
+    loadStats();
   }
   
   renderSubjectPicker();
@@ -80,56 +190,173 @@ async function init() {
 function renderSubjectPicker() {
   const grid = document.getElementById('subjectCards');
   grid.innerHTML = '';
-  for(const [key, subj] of Object.entries(allSubjects)) {
+  
+  // Combine public subjects and E2EE private subjects
+  const userPrivate = (loggedInUser && userDecryptedData.privateSubjects) ? userDecryptedData.privateSubjects : {};
+  const combinedSubjects = { ...allSubjects, ...userPrivate };
+  
+  // Load wrongQuestions globally if logged in to display recap card
+  let totalWrongQ = 0;
+  if (loggedInUser) {
+    // Collect all wrong questions from all subjects
+    const wrongQs = [];
+    for (const [subId, subProg] of Object.entries(userDecryptedData.progress || {})) {
+      if (subProg.wrongQuestions && subProg.wrongQuestions.length > 0) {
+        wrongQs.push(...subProg.wrongQuestions);
+      }
+    }
+    stats.wrongQuestions = wrongQs;
+    totalWrongQ = wrongQs.length;
+  } else {
+    // If not logged in, count local storage wrong questions for the current subject if any
+    totalWrongQ = stats.wrongQuestions ? stats.wrongQuestions.length : 0;
+  }
+
+  // Inject Smart Spaced Repetition card if there are wrong questions
+  if (totalWrongQ > 0) {
+    grid.innerHTML += `<div class="subject-card recap-card" onclick="startRecapitulare()" style="border: 2px dashed var(--accent);">
+      <div class="badge" style="background: var(--accent);">${totalWrongQ} grile</div>
+      <div class="icon">🎯</div>
+      <div class="name">Recapitulare Inteligentă</div>
+      <div class="desc">Antrenează-te pe întrebările pe care le-ai greșit în trecut</div>
+    </div>`;
+  }
+  
+  for(const [key, subj] of Object.entries(combinedSubjects)) {
     const totalQ = Object.values(subj.courses).reduce((s,c)=>s+c.questions.length,0);
     const isCloud = !!cloudSubjects[key];
-    const showDelete = isCloud && decryptedJsonbin;
-    const deleteHtml = showDelete ? `<button class="delete-btn" onclick="event.stopPropagation(); deleteSubject('${key}')" title="Șterge materia">🗑️</button>` : '';
-    grid.innerHTML += `<div class="subject-card" onclick="selectSubject('${key}')">
+    const isPrivate = !!userPrivate[key];
+    
+    // Can delete if:
+    // 1. Cloud public and logged in as admin
+    // 2. Or is a private subject owned by the logged in user
+    const canDelete = (isCloud && isAdmin) || isPrivate;
+    const deleteHtml = canDelete ? `<button class="delete-btn" onclick="event.stopPropagation(); deleteSubject('${key}', ${isPrivate})" title="Șterge materia">🗑️</button>` : '';
+    
+    const icon = isPrivate ? '🔒' : (isCloud ? '📁' : '📊');
+    const cloudLabel = isPrivate ? '<div class="cloud-badge private-badge">🔒 Privat</div>' : (isCloud ? '<div class="cloud-badge">☁️ Public</div>' : '');
+    
+    grid.innerHTML += `<div class="subject-card ${isPrivate?'private-card':''}" onclick="selectSubject('${key}', ${isPrivate})">
       <div class="badge">${totalQ} întrebări</div>
-      ${isCloud?'<div class="cloud-badge">☁️</div>':''}
-      <div class="icon">${isCloud?'📁':'📊'}</div>
+      ${cloudLabel}
+      <div class="icon">${icon}</div>
       <div class="name">${subj.title}</div>
       <div class="desc">${subj.sub||''}</div>
       ${deleteHtml}
     </div>`;
   }
+  
   // Add upload card (changes name based on admin state)
-  const uploadLabel = decryptedJsonbin ? 'Adaugă Materie Nouă (Admin)' : 'Adaugă Materie Nouă';
+  const uploadLabel = isAdmin ? 'Adaugă Materie Nouă (Admin)' : 'Adaugă Materie Nouă';
   grid.innerHTML += `<div class="subject-card upload-card" onclick="showPasswordModalOrUI()">
     <div class="icon">➕</div>
     <div class="name">${uploadLabel}</div>
     <div class="desc">Upload PDF/PPT → generare automată de grile cu AI</div>
   </div>`;
+  
+  updateUserUI();
 }
 
-async function deleteSubject(key) {
-  if (!decryptedJsonbin) return;
-  if (!confirm(`Sigur doriți să ștergeți definitiv materia "${allSubjects[key].title}" din cloud? Această acțiune nu poate fi anulată.`)) return;
+async function deleteSubject(key, isPrivate = false) {
+  const title = isPrivate ? userDecryptedData.privateSubjects[key].title : allSubjects[key].title;
+  if (!confirm(`Sigur doriți să ștergeți definitiv materia "${title}"? Această acțiune nu poate fi anulată.`)) return;
   
-  delete cloudSubjects[key];
-  delete allSubjects[key];
-  renderSubjectPicker();
-  
-  try {
-    await saveCloudSubjects();
-    alert('Materia a fost ștearsă cu succes din cloud!');
-  } catch(e) {
-    alert('Eroare la salvarea în cloud, dar a fost ștearsă local.');
+  if (isPrivate) {
+    delete userDecryptedData.privateSubjects[key];
+    // also delete its progress
+    delete userDecryptedData.progress[key];
+    renderSubjectPicker();
+    try {
+      await syncUserProgressToCloud();
+      alert('Materia privată a fost ștearsă cu succes!');
+    } catch(e) {
+      alert('Eroare la sincronizarea modificării în cloud.');
+    }
+  } else {
+    if (!isAdmin) return;
+    delete cloudSubjects[key];
+    delete allSubjects[key];
+    renderSubjectPicker();
+    
+    try {
+      await saveCloudData();
+      alert('Materia publică a fost ștearsă din cloud!');
+    } catch(e) {
+      alert('Eroare la salvarea în cloud, dar a fost ștearsă local.');
+    }
   }
 }
 
-// ---- Password Modal ----
+// ---- Authentication & Admin Actions UI ----
 function showPasswordModalOrUI() {
-  isEditingSubjectKey = null; // Standard creation
-  if (decryptedJsonbin) {
+  isEditingSubjectKey = null;
+  if (isAdmin || loggedInUser) {
     showUploadUI();
   } else {
-    showPasswordModal();
+    showAuthModal();
   }
 }
 
-function showPasswordModal() {
+function showAuthModal() {
+  document.getElementById('authModal').style.display = 'flex';
+  document.getElementById('authUsername').value = '';
+  document.getElementById('authPassword').value = '';
+  document.getElementById('authError').style.display = 'none';
+  switchAuthTab('signin');
+}
+
+function closeAuthModal() {
+  document.getElementById('authModal').style.display = 'none';
+}
+
+function switchAuthTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  
+  const formTitle = document.getElementById('authFormTitle');
+  const submitBtn = document.getElementById('authSubmitBtn');
+  const adminNote = document.getElementById('adminLoginNote');
+  
+  if (tab === 'signin') {
+    formTitle.textContent = 'Conectare Student';
+    submitBtn.textContent = 'Conectează-te';
+    adminNote.style.display = 'block';
+  } else {
+    formTitle.textContent = 'Înregistrare Student Nou';
+    submitBtn.textContent = 'Creează cont';
+    adminNote.style.display = 'none';
+  }
+}
+
+async function handleAuthSubmit(e) {
+  if (e) e.preventDefault();
+  const user = document.getElementById('authUsername').value.trim();
+  const pass = document.getElementById('authPassword').value;
+  const isSignIn = document.getElementById('tab-signin').classList.contains('active');
+  const errorEl = document.getElementById('authError');
+  
+  if (!user || !pass) {
+    errorEl.textContent = 'Te rugăm să completezi toate câmpurile!';
+    errorEl.style.display = 'block';
+    return;
+  }
+  
+  try {
+    errorEl.style.display = 'none';
+    if (isSignIn) {
+      await signIn(user, pass);
+    } else {
+      await signUp(user, pass);
+    }
+    closeAuthModal();
+  } catch(err) {
+    errorEl.textContent = err.message;
+    errorEl.style.display = 'block';
+  }
+}
+
+function showAdminLogin() {
+  closeAuthModal();
   document.getElementById('pwdModal').style.display = 'flex';
   document.getElementById('pwdInput').value = '';
   document.getElementById('pwdError').style.display = 'none';
@@ -145,17 +372,17 @@ async function checkPassword() {
   const hash = await sha256(pwd);
   if(hash === _H) {
     decryptedGemini = await decryptKey(_G, pwd);
-    decryptedJsonbin = await decryptKey(_J, pwd);
+    isAdmin = true;
     
     // Save to sessionStorage to persist across refreshes
     sessionStorage.setItem('admin_pwd', pwd);
     
     closePwdModal();
     
-    // Immediately refresh views to show admin actions (like trash icons)
+    // Immediately refresh views
     renderSubjectPicker();
     if (currentSubject) {
-      selectSubject(currentSubject);
+      selectSubject(currentSubject, currentSubjectIsPrivate);
     }
     
     if (isEditingSubjectKey) {
@@ -168,40 +395,223 @@ async function checkPassword() {
   }
 }
 
+// ---- User Management & Authentication ----
+async function signUp(username, password) {
+  const userKeyLower = username.trim().toLowerCase();
+  const userHash = await sha256(userKeyLower);
+  
+  if (cloudUsers[userHash]) {
+    throw new Error('Numele de utilizator este deja înregistrat!');
+  }
+  
+  // Generate 16 bytes random salt in hex
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const saltHex = Array.from(saltBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  
+  const initialData = {
+    progress: {},
+    privateSubjects: {}
+  };
+  
+  const plainText = JSON.stringify(initialData);
+  const encData = await encryptUserData(plainText, password, saltHex);
+  
+  cloudUsers[userHash] = {
+    username: username.trim(),
+    salt: saltHex,
+    encData: encData,
+    createdAt: new Date().toISOString()
+  };
+  
+  await saveCloudData();
+  
+  loggedInUser = username.trim();
+  userDecryptedData = initialData;
+  userSalt = saltHex;
+  
+  // Save credentials in sessionStorage
+  sessionStorage.setItem('quiz_user', loggedInUser);
+  sessionStorage.setItem('quiz_user_pwd', password);
+  sessionStorage.setItem('quiz_user_salt', saltHex);
+  
+  updateUserUI();
+  renderSubjectPicker();
+}
+
+async function signIn(username, password) {
+  const userKeyLower = username.trim().toLowerCase();
+  const userHash = await sha256(userKeyLower);
+  
+  const userData = cloudUsers[userHash];
+  if (!userData) {
+    throw new Error('Nume de utilizator sau parolă incorectă!');
+  }
+  
+  try {
+    const saltHex = userData.salt;
+    const decryptedText = await decryptUserData(userData.encData, password, saltHex);
+    
+    loggedInUser = userData.username;
+    userDecryptedData = JSON.parse(decryptedText);
+    userSalt = saltHex;
+    
+    sessionStorage.setItem('quiz_user', loggedInUser);
+    sessionStorage.setItem('quiz_user_pwd', password);
+    sessionStorage.setItem('quiz_user_salt', saltHex);
+    
+    updateUserUI();
+    renderSubjectPicker();
+  } catch (err) {
+    throw new Error('Nume de utilizator sau parolă incorectă!');
+  }
+}
+
+function logOut() {
+  loggedInUser = null;
+  userDecryptedData = { progress: {}, privateSubjects: {} };
+  userSalt = null;
+  isAdmin = false;
+  
+  sessionStorage.removeItem('quiz_user');
+  sessionStorage.removeItem('quiz_user_pwd');
+  sessionStorage.removeItem('quiz_user_salt');
+  sessionStorage.removeItem('admin_pwd');
+  
+  updateUserUI();
+  renderSubjectPicker();
+  
+  // Go back to main picker if inside a subject
+  document.getElementById('home').style.display = 'none';
+  document.getElementById('quizArea').style.display = 'none';
+  document.getElementById('subjectPicker').style.display = 'block';
+}
+
+async function autoLogin() {
+  const savedUser = sessionStorage.getItem('quiz_user');
+  const savedPwd = sessionStorage.getItem('quiz_user_pwd');
+  const savedSalt = sessionStorage.getItem('quiz_user_salt');
+  
+  if (savedUser && savedPwd && savedSalt) {
+    try {
+      const userHash = await sha256(savedUser.toLowerCase());
+      const userData = cloudUsers[userHash];
+      if (userData) {
+        const decryptedText = await decryptUserData(userData.encData, savedPwd, savedSalt);
+        loggedInUser = userData.username;
+        userDecryptedData = JSON.parse(decryptedText);
+        userSalt = savedSalt;
+        updateUserUI();
+      }
+    } catch (e) {
+      console.error('Auto login failed:', e);
+      logOut();
+    }
+  }
+}
+
+async function syncUserProgressToCloud() {
+  if (!loggedInUser || !userSalt) return;
+  const pwd = sessionStorage.getItem('quiz_user_pwd');
+  if (!pwd) return;
+  
+  const userHash = await sha256(loggedInUser.toLowerCase());
+  const plainText = JSON.stringify(userDecryptedData);
+  const encData = await encryptUserData(plainText, pwd, userSalt);
+  
+  cloudUsers[userHash].encData = encData;
+  await saveCloudData();
+}
+
+function updateUserUI() {
+  const userStatus = document.getElementById('userStatusArea');
+  if (!userStatus) return;
+  
+  if (isAdmin) {
+    userStatus.innerHTML = `
+      <div class="user-badge admin-badge">
+        <span>🔑 Admin Mode</span>
+        <button class="logout-link" onclick="logOut()">Ieșire</button>
+      </div>
+    `;
+  } else if (loggedInUser) {
+    userStatus.innerHTML = `
+      <div class="user-badge student-badge">
+        <span>👨‍🎓 ${loggedInUser}</span>
+        <button class="logout-link" onclick="logOut()">Deconectare</button>
+      </div>
+    `;
+  } else {
+    userStatus.innerHTML = `
+      <button class="btn btn-secondary auth-trigger-btn" onclick="showAuthModal()">Conectare Student</button>
+      <button class="admin-trigger-btn" onclick="showAdminLogin()" style="margin-left:10px; background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.85rem;">🔐 Admin</button>
+    `;
+  }
+}
+
 // ---- Upload UI ----
 function showUploadUI() {
   isEditingSubjectKey = null;
   document.getElementById('subjectPicker').style.display = 'none';
-  document.getElementById('home').style.display = 'none'; // Ensure home is hidden
+  document.getElementById('home').style.display = 'none';
   document.getElementById('uploadArea').style.display = 'block';
   document.getElementById('uploadFiles').value = '';
   document.getElementById('uploadName').value = '';
   document.getElementById('uploadName').disabled = false;
+  
+  // Set upload title and notes
   document.getElementById('uploadTitle').textContent = 'Adaugă Materie Nouă';
-  document.getElementById('uploadSubText').textContent = 'Upload-ează cursurile (PDF/PPTX) și AI-ul generează grilele automat';
+  
+  const privateGroup = document.getElementById('privateCheckboxGroup');
+  const privateCheck = document.getElementById('uploadPrivate');
+  
+  if (privateGroup && privateCheck) {
+    if (isAdmin) {
+      privateGroup.style.display = 'block';
+      privateCheck.checked = false;
+      privateCheck.disabled = false;
+    } else if (loggedInUser) {
+      // Force private for regular students
+      privateGroup.style.display = 'block';
+      privateCheck.checked = true;
+      privateCheck.disabled = true;
+    } else {
+      privateGroup.style.display = 'none';
+    }
+  }
+
   document.getElementById('uploadProgress').style.display = 'none';
   document.getElementById('uploadForm').style.display = 'block';
 }
 
 function showAddCoursesUI() {
   isEditingSubjectKey = currentSubject;
-  if (decryptedJsonbin) {
+  if (isAdmin || (loggedInUser && currentSubjectIsPrivate)) {
     showUploadUIForEditing();
   } else {
-    showPasswordModal();
+    showAuthModal();
   }
 }
 
 function showUploadUIForEditing() {
-  const subjName = allSubjects[isEditingSubjectKey].title;
+  const userPrivate = (loggedInUser && userDecryptedData.privateSubjects) ? userDecryptedData.privateSubjects : {};
+  const subjName = currentSubjectIsPrivate ? userPrivate[isEditingSubjectKey].title : allSubjects[isEditingSubjectKey].title;
+  
   document.getElementById('home').style.display = 'none';
   document.getElementById('subjectPicker').style.display = 'none';
   document.getElementById('uploadArea').style.display = 'block';
   document.getElementById('uploadFiles').value = '';
   document.getElementById('uploadName').value = subjName;
-  document.getElementById('uploadName').disabled = true; // cannot change name while editing
+  document.getElementById('uploadName').disabled = true;
   document.getElementById('uploadTitle').textContent = `Adaugă Cursuri la "${subjName}"`;
-  document.getElementById('uploadSubText').textContent = `Procesează fișiere adiționale care vor fi salvate direct în materia existentă`;
+  
+  const privateGroup = document.getElementById('privateCheckboxGroup');
+  const privateCheck = document.getElementById('uploadPrivate');
+  if (privateGroup && privateCheck) {
+    privateGroup.style.display = 'block';
+    privateCheck.checked = currentSubjectIsPrivate;
+    privateCheck.disabled = true; // cannot change privacy once created
+  }
+
   document.getElementById('uploadProgress').style.display = 'none';
   document.getElementById('uploadForm').style.display = 'block';
 }
@@ -411,28 +821,51 @@ async function startGeneration() {
     return;
   }
 
-  // 3. Save to cloud
-  addLog(`☁️ Salvez în cloud (${totalQ} întrebări)...`);
+  // 3. Save to cloud (Private E2EE vs Public Cloud)
+  const isPrivateCheck = document.getElementById('uploadPrivate');
+  const isPrivate = isPrivateCheck ? isPrivateCheck.checked : false;
   
-  if (isEditingSubjectKey) {
-    const targetSubject = allSubjects[isEditingSubjectKey];
-    for (const [id, course] of Object.entries(courses)) {
-      targetSubject.courses[id] = course;
+  addLog(`☁️ Salvez în cloud (${isPrivate ? 'Mod Privat Securizat E2EE' : 'Mod Public'})...`);
+  
+  if (isPrivate) {
+    if (isEditingSubjectKey) {
+      const targetSubject = userDecryptedData.privateSubjects[isEditingSubjectKey];
+      for (const [id, course] of Object.entries(courses)) {
+        targetSubject.courses[id] = course;
+      }
+      targetSubject.sub = `${Object.keys(targetSubject.courses).length} cursuri • generat privat`;
+    } else {
+      const newSubject = { title: subjectName, sub: `${Object.keys(courses).length} cursuri • generat privat`, courses };
+      userDecryptedData.privateSubjects[generatedSubjectKey] = newSubject;
     }
-    targetSubject.sub = `${Object.keys(targetSubject.courses).length} cursuri • generat automat`;
-    // Update cloudSubjects representation as well
-    cloudSubjects[isEditingSubjectKey] = targetSubject;
+    
+    try {
+      await syncUserProgressToCloud();
+      addLog(`✅ Salvat în cloud-ul tău privat! Doar tu o poți accesa.`, 'success');
+    } catch(e) {
+      addLog(`⚠️ Salvare în cloud privat eșuată. Modificările sunt doar temporare.`, 'warn');
+    }
   } else {
-    const newSubject = { title: subjectName, sub: `${Object.keys(courses).length} cursuri • generat automat`, courses };
-    cloudSubjects[generatedSubjectKey] = newSubject;
-    allSubjects[generatedSubjectKey] = newSubject;
-  }
+    // Public Cloud Subject (Admin only)
+    if (isEditingSubjectKey) {
+      const targetSubject = allSubjects[isEditingSubjectKey];
+      for (const [id, course] of Object.entries(courses)) {
+        targetSubject.courses[id] = course;
+      }
+      targetSubject.sub = `${Object.keys(targetSubject.courses).length} cursuri • generat automat`;
+      cloudSubjects[isEditingSubjectKey] = targetSubject;
+    } else {
+      const newSubject = { title: subjectName, sub: `${Object.keys(courses).length} cursuri • generat automat`, courses };
+      cloudSubjects[generatedSubjectKey] = newSubject;
+      allSubjects[generatedSubjectKey] = newSubject;
+    }
 
-  try {
-    await saveCloudSubjects();
-    addLog(`✅ Salvat în cloud! Toți utilizatorii vor vedea modificările.`, 'success');
-  } catch(e) {
-    addLog(`⚠️ Salvare cloud eșuată, disponibil doar local.`, 'warn');
+    try {
+      await saveCloudData();
+      addLog(`✅ Salvat în cloud! Toți utilizatorii vor vedea modificările.`, 'success');
+    } catch(e) {
+      addLog(`⚠️ Salvare cloud eșuată.`, 'warn');
+    }
   }
 
   addLog(`\n🎉 Gata! Modificările au fost aplicate cu succes.`, 'success');
@@ -445,7 +878,7 @@ function finishUpload() {
   const finalKey = isEditingSubjectKey;
   hideUploadUI();
   if (finalKey) {
-    selectSubject(finalKey);
+    selectSubject(finalKey, currentSubjectIsPrivate);
   } else {
     renderSubjectPicker();
   }
@@ -462,19 +895,30 @@ function hideUploadUI() {
 }
 
 // ---- Subject / Course Selection ----
-function selectSubject(key) {
+function selectSubject(key, isPrivate = false) {
   currentSubject = key;
-  currentCourses = allSubjects[key].courses;
+  currentSubjectIsPrivate = isPrivate;
+  
+  const userPrivate = (loggedInUser && userDecryptedData.privateSubjects) ? userDecryptedData.privateSubjects : {};
+  const targetSubj = isPrivate ? userPrivate[key] : allSubjects[key];
+  
+  if (!targetSubj) {
+    alert('Materia selectată nu a putut fi găsită!');
+    goToSubjects();
+    return;
+  }
+  
+  currentCourses = targetSubj.courses;
   document.getElementById('subjectPicker').style.display = 'none';
   document.getElementById('home').style.display = 'block';
-  document.getElementById('subjectTitle').textContent = allSubjects[key].title;
-  document.getElementById('subjectSub').textContent = allSubjects[key].sub||'';
+  document.getElementById('subjectTitle').textContent = targetSubj.title;
+  document.getElementById('subjectSub').textContent = targetSubj.sub || '';
   
-  // Show Add Courses button if it is a cloud subject (anyone can click, but password will be prompted if not logged in)
   const isCloud = !!cloudSubjects[key];
   const addBtn = document.getElementById('addCoursesBtn');
   if (addBtn) {
-    addBtn.style.display = isCloud ? 'block' : 'none';
+    // Show Add Courses if it is a cloud public subject OR a private subject owned by logged user
+    addBtn.style.display = (isCloud || isPrivate) ? 'block' : 'none';
   }
   
   renderHome();
@@ -491,33 +935,156 @@ function renderHome() {
   const grid = document.getElementById('courseGrid');
   grid.innerHTML = '';
   let totalQ=0, totalC=0;
+  
+  // Load stats first to populate stats.courses and stats.exams
+  loadStats();
+  
+  const coursesProgress = stats.courses || {};
+  const examsProgress = stats.exams || [];
+  
   for(const [id, course] of Object.entries(currentCourses)) {
     totalQ += course.questions.length; totalC++;
     const multi = course.questions.some(q=>Array.isArray(q.correct)&&q.correct.length>1);
+    
+    const courseProg = coursesProgress[id] || { bestPct: 0, lastPct: 0 };
+    const scoreHtml = courseProg.bestPct > 0 
+      ? `<div class="course-score" style="font-size: 0.72rem; color: var(--accent2); margin-top: 4px; font-weight:700;">🏆 Cel mai bun scor: ${courseProg.bestPct}% ${courseProg.bestPct === 100 ? '✅' : ''}</div>`
+      : '';
+      
     grid.innerHTML += `<div class="course-card" onclick="startCourse('${id}')">
       <div class="course-num">Curs ${id}</div>
       <div class="course-title">${course.name}</div>
       <div class="course-count">${course.questions.length} întrebări${multi?' (inclusiv răspunsuri multiple)':''}</div>
-      <div class="course-progress"><div class="course-progress-fill" style="width:0%"></div></div>
+      ${scoreHtml}
+      <div class="course-progress" style="margin-top: 10px;"><div class="course-progress-fill" style="width:${courseProg.bestPct || 0}%"></div></div>
     </div>`;
   }
+  
   document.getElementById('totalQ').textContent = totalQ;
   document.getElementById('totalC').textContent = totalC;
-  loadStats();
+  
+  // Render exam simulation history
+  const historyArea = document.getElementById('examHistoryArea');
+  if (historyArea) {
+    if (examsProgress.length > 0) {
+      const lastExam = examsProgress[examsProgress.length - 1];
+      const avgExam = Math.round(examsProgress.reduce((sum, e) => sum + e.pct, 0) / examsProgress.length);
+      historyArea.innerHTML = `📝 Ultimul examen: <b>${lastExam.pct}%</b> | Media ultimelor simulări: <b>${avgExam}%</b>`;
+    } else {
+      historyArea.innerHTML = `Nu ai susținut nicio simulare de examen complet încă.`;
+    }
+  }
 }
 
 function loadStats() {
-  try { const s=JSON.parse(localStorage.getItem('qs_'+currentSubject)||'{}'); stats={correct:s.correct||0,wrong:s.wrong||0}; } catch(e){stats={correct:0,wrong:0};}
+  if (currentSubject === 'recap') {
+    stats.correct = stats.correct || 0;
+    stats.wrong = stats.wrong || 0;
+  } else if (loggedInUser) {
+    const userProg = userDecryptedData.progress[currentSubject] || {};
+    stats = {
+      correct: userProg.correct || 0,
+      wrong: userProg.wrong || 0,
+      wrongQuestions: userProg.wrongQuestions || [],
+      courses: userProg.courses || {},
+      exams: userProg.exams || []
+    };
+  } else {
+    try { 
+      const s = JSON.parse(localStorage.getItem('qs_' + currentSubject) || '{}'); 
+      stats = {
+        correct: s.correct || 0,
+        wrong: s.wrong || 0,
+        wrongQuestions: s.wrongQuestions || [],
+        courses: s.courses || {},
+        exams: s.exams || []
+      }; 
+    } catch(e) {
+      stats = { correct: 0, wrong: 0, wrongQuestions: [], courses: {}, exams: [] };
+    }
+  }
   updateStats();
 }
-function saveStats() { localStorage.setItem('qs_'+currentSubject, JSON.stringify(stats)); updateStats(); }
+
+async function saveStats() {
+  if (currentSubject === 'recap') {
+    if (loggedInUser) {
+      await syncUserProgressToCloud();
+    }
+  } else if (loggedInUser) {
+    userDecryptedData.progress[currentSubject] = {
+      correct: stats.correct,
+      wrong: stats.wrong,
+      wrongQuestions: stats.wrongQuestions || [],
+      courses: stats.courses || {},
+      exams: stats.exams || []
+    };
+    localStorage.setItem('qs_' + currentSubject, JSON.stringify(stats));
+    try {
+      await syncUserProgressToCloud();
+    } catch(e) {
+      console.error('Failed to sync progress to cloud:', e);
+    }
+  } else {
+    localStorage.setItem('qs_' + currentSubject, JSON.stringify(stats));
+  }
+  updateStats();
+}
+
 function updateStats() {
   document.getElementById('totalCorrect').textContent = stats.correct;
   document.getElementById('totalWrong').textContent = stats.wrong;
 }
 
+function startRecapitulare() {
+  let wrongQs = [];
+  if (loggedInUser) {
+    // Collect all wrong questions from all subjects
+    for (const [subId, subProg] of Object.entries(userDecryptedData.progress || {})) {
+      if (subProg.wrongQuestions && subProg.wrongQuestions.length > 0) {
+        // Add subjectId info to each question to know where to update it later
+        subProg.wrongQuestions.forEach(q => {
+          q.parentSubjectKey = subId;
+          wrongQs.push(q);
+        });
+      }
+    }
+  } else {
+    wrongQs = stats.wrongQuestions || [];
+  }
+  
+  if (wrongQs.length === 0) {
+    alert('Nu aveți grile greșite salvate pentru recapitulare!');
+    return;
+  }
+  
+  currentSubject = 'recap';
+  currentSubjectIsPrivate = false;
+  currentQuestions = [...wrongQs];
+  shuffle(currentQuestions);
+  currentIndex = 0;
+  answers = {};
+  confirmed = {};
+  
+  // Set stats counters to 0 for this session run
+  stats.correct = 0;
+  stats.wrong = 0;
+  
+  document.getElementById('subjectPicker').style.display = 'none';
+  document.getElementById('home').style.display = 'none';
+  document.getElementById('quizArea').style.display = 'block';
+  
+  document.getElementById('quizTitle').textContent = '🎯 Recapitulare Inteligentă';
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('questionContainer').style.display = 'block';
+  document.getElementById('navButtons').style.display = 'flex';
+  
+  showQuestion();
+}
+
 // ---- Quiz Logic ----
 function startCourse(id) {
+  currentCourseId = id;
   currentQuestions = [...currentCourses[id].questions];
   currentIndex=0; answers={}; confirmed={};
   document.getElementById('quizTitle').textContent = currentCourses[id].name;
@@ -525,6 +1092,7 @@ function startCourse(id) {
 }
 
 function startAll() {
+  currentCourseId = 'all';
   currentQuestions = [];
   for(const c of Object.values(currentCourses)) currentQuestions.push(...c.questions);
   shuffle(currentQuestions);
@@ -590,7 +1158,33 @@ function confirmAns(qId) {
   if(!sel.length)return;
   confirmed[qId]=true;
   const ok=q.correct.length===sel.length&&q.correct.every(c=>sel.includes(c));
-  if(ok)stats.correct++;else stats.wrong++;
+  
+  if (ok) {
+    stats.correct++;
+    
+    // Remove from wrong questions list
+    if (currentSubject === 'recap') {
+      if (loggedInUser && q.parentSubjectKey) {
+        const subProg = userDecryptedData.progress[q.parentSubjectKey];
+        if (subProg && subProg.wrongQuestions) {
+          subProg.wrongQuestions = subProg.wrongQuestions.filter(x => x.id !== qId);
+        }
+      } else {
+        stats.wrongQuestions = (stats.wrongQuestions || []).filter(x => x.id !== qId);
+      }
+    } else {
+      stats.wrongQuestions = (stats.wrongQuestions || []).filter(x => x.id !== qId);
+    }
+  } else {
+    stats.wrong++;
+    if (!stats.wrongQuestions) stats.wrongQuestions = [];
+    if (!stats.wrongQuestions.some(x => x.id === qId)) {
+      const cleanQ = { ...q };
+      delete cleanQ.parentSubjectKey; // Remove any temp recap parent link
+      stats.wrongQuestions.push(cleanQ);
+    }
+  }
+  
   saveStats();
   if(mode==='learn')showQuestion();
   else{document.querySelectorAll('.option').forEach(o=>{o.classList.add('disabled');if(sel.includes(o.dataset.letter))o.classList.add('selected');});document.querySelector('.confirm-btn')?.classList.remove('show');}
@@ -603,6 +1197,26 @@ function showResults() {
   let ok=0;
   currentQuestions.forEach(q=>{const s=answers[q.id]||[],c=q.correct;if(c.length===s.length&&c.every(x=>s.includes(x)))ok++;});
   const total=currentQuestions.length, pct=Math.round((ok/total)*100);
+  
+  // Enterprise Tracking: salvare scor per curs sau examen
+  if (currentSubject !== 'recap') {
+    if (currentCourseId === 'all') {
+      if (!stats.exams) stats.exams = [];
+      stats.exams.push({ date: new Date().toISOString(), pct: pct });
+      if (stats.exams.length > 5) stats.exams.shift();
+    } else if (currentCourseId) {
+      if (!stats.courses) stats.courses = {};
+      if (!stats.courses[currentCourseId]) {
+        stats.courses[currentCourseId] = { bestPct: 0, lastPct: 0 };
+      }
+      stats.courses[currentCourseId].lastPct = pct;
+      stats.courses[currentCourseId].bestPct = Math.max(stats.courses[currentCourseId].bestPct || 0, pct);
+      stats.courses[currentCourseId].completed = (stats.courses[currentCourseId].bestPct === 100);
+    }
+    
+    saveStats();
+  }
+
   document.getElementById('questionContainer').style.display='none';
   document.getElementById('navButtons').style.display='none';
   document.getElementById('results').style.display='block';

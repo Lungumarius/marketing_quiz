@@ -122,10 +122,128 @@ h2.section-title{font-size:1.5rem;font-weight:800;background:linear-gradient(135
 .results-score{font-size:2.5rem;font-weight:900;background:linear-gradient(135deg,var(--accent),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:6px}
 .results-text{color:var(--text2);font-size:.9rem;margin-bottom:20px}
 @media(max-width:600px){#subjectPicker h1{font-size:1.5rem}#subjectCards,.course-grid{grid-template-columns:1fr}.q-text{font-size:.88rem}}
+
+/* User Status Area & Badges */
+.user-status-container {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.user-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+.student-badge {
+  background: rgba(124, 58, 237, 0.1);
+  color: var(--accent2);
+  border-color: rgba(124, 58, 237, 0.2);
+}
+.admin-badge {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--green);
+  border-color: rgba(16, 185, 129, 0.2);
+}
+.logout-link {
+  background: none;
+  border: none;
+  color: var(--red);
+  font-family: inherit;
+  font-weight: 700;
+  font-size: 0.78rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+.logout-link:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+.auth-trigger-btn {
+  background: rgba(124,58,237,0.15);
+  color: var(--accent2);
+  border: 1px solid rgba(124,58,237,0.3);
+}
+.auth-trigger-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Auth Modal Tabs */
+.modal-tabs {
+  display: flex;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 20px;
+  justify-content: center;
+}
+.tab-btn {
+  background: none;
+  border: none;
+  color: var(--text2);
+  padding: 10px 20px;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+.tab-btn:hover {
+  color: var(--text);
+}
+.tab-btn.active {
+  color: var(--accent2);
+  border-bottom: 2px solid var(--accent);
+}
+
+/* Checkbox group styling */
+.checkbox-group {
+  margin: 16px 0;
+  text-align: left;
+}
+.checkbox-label {
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text2) !important;
+  font-size: 0.85rem !important;
+}
+.checkbox-label input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Badges for subjects */
+.private-badge {
+  background: var(--orange) !important;
+  color: #000 !important;
+  font-weight: 800;
+}
+.recap-card {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.05), rgba(245, 158, 11, 0.05)) !important;
+  border: 2px dashed rgba(124, 58, 237, 0.3) !important;
+}
+.recap-card:hover {
+  border-color: var(--accent) !important;
+  box-shadow: 0 12px 36px rgba(124,58,237,0.15) !important;
+}
 </style>
 </head>
 <body>
 <div class="container">
+
+<div class="user-status-container" id="userStatusArea"></div>
 
 <!-- SUBJECT PICKER -->
 <div id="subjectPicker">
@@ -147,6 +265,29 @@ h2.section-title{font-size:1.5rem;font-weight:800;background:linear-gradient(135
 </div>
 </div>
 
+<!-- AUTH MODAL -->
+<div class="modal-overlay" id="authModal">
+<div class="modal" style="max-width: 420px;">
+<div class="modal-tabs">
+<button class="tab-btn active" id="tab-signin" onclick="switchAuthTab('signin')">Conectare</button>
+<button class="tab-btn" id="tab-signup" onclick="switchAuthTab('signup')">Înregistrare</button>
+</div>
+<h3 id="authFormTitle" style="margin-bottom: 20px;">Conectare Student</h3>
+<form onsubmit="handleAuthSubmit(event)">
+<input type="text" id="authUsername" placeholder="Nume utilizator..." autocomplete="username">
+<input type="password" id="authPassword" placeholder="Parolă cont..." autocomplete="current-password">
+<div class="pwd-error" id="authError"></div>
+<div class="modal-btns">
+<button type="button" class="btn btn-outline" onclick="closeAuthModal()">Anulează</button>
+<button type="submit" class="btn btn-primary" id="authSubmitBtn">Conectează-te</button>
+</div>
+</form>
+<div id="adminLoginNote" style="margin-top: 20px; font-size: 0.8rem; color: var(--text2);">
+Ești administrator? <a href="#" onclick="showAdminLogin()" style="color: var(--accent2); text-decoration: none; font-weight: 600;">Conectează-te ca Admin</a>
+</div>
+</div>
+</div>
+
 <!-- UPLOAD AREA -->
 <div id="uploadArea">
 <div class="upload-header">
@@ -163,6 +304,14 @@ h2.section-title{font-size:1.5rem;font-weight:800;background:linear-gradient(135
 <p id="fileCount" style="color:var(--accent);font-weight:600;margin-top:6px"></p>
 </div>
 <input type="file" id="uploadFiles" multiple accept=".pdf,.pptx,.ppt" style="display:none" onchange="document.getElementById('fileCount').textContent=this.files.length+' fișiere selectate'">
+
+<div class="checkbox-group" id="privateCheckboxGroup" style="display:none;">
+<label class="checkbox-label">
+<input type="checkbox" id="uploadPrivate" checked>
+<span>🔒 Marcare ca Materie Privată (criptată și salvată exclusiv în contul tău)</span>
+</label>
+</div>
+
 <div style="display:flex;gap:8px;justify-content:center">
 <button class="btn btn-outline" onclick="hideUploadUI()">← Înapoi</button>
 <button class="btn btn-primary" onclick="startGeneration()">🤖 Generează Grile</button>
@@ -185,9 +334,12 @@ h2.section-title{font-size:1.5rem;font-weight:800;background:linear-gradient(135
 <div class="stat"><div class="stat-val green" id="totalCorrect">0</div><div class="stat-label">Corecte</div></div>
 <div class="stat"><div class="stat-val red" id="totalWrong">0</div><div class="stat-label">Greșite</div></div>
 </div>
-<div style="display:flex;justify-content:center;gap:8px;margin-bottom:20px;flex-wrap:wrap">
+<div style="display:flex;flex-direction:column;align-items:center;gap:8px;margin-bottom:20px;">
+<div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
 <button class="btn btn-primary" onclick="startAll()" style="font-size:.92rem;padding:12px 28px">🎯 Simulare Examen</button>
 <button class="btn btn-outline" id="addCoursesBtn" style="display:none" onclick="showAddCoursesUI()">➕ Adaugă Cursuri</button>
+</div>
+<div id="examHistoryArea" style="font-size:0.8rem; color:var(--text2); text-align:center; margin-top:4px;"></div>
 </div>
 <div style="text-align:center;margin-bottom:14px"><button class="btn btn-outline" onclick="goToSubjects()">← Schimbă materia</button></div>
 <div class="course-grid" id="courseGrid"></div>

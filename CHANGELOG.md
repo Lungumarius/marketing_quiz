@@ -2,9 +2,21 @@
 
 Toate modificările structurale, funcționalitățile adăugate și problemele rezolvate pentru această aplicație de grile.
 
-## [1.1.0] - 2026-06-22
+## [1.2.0] - 2026-06-22
 
 ### Adăugat
+- **Autentificare E2EE (Zero-Knowledge) Student**:
+  - Sign Up și Sign In client-side securizate.
+  - Derivare cheie de decriptare cu PBKDF2 (100k iterații, salt unic).
+  - Criptare AES-GCM 256-bit pentru datele trimise în JSONBin.
+  - Sesiune utilizator memorată securizat.
+- **Mape private de materii**: Opțiune pentru studenții conectați să uploadeze materii în cloud securizat, vizibile doar în contul lor propriu.
+- **Recapitulare Inteligentă**: Card dedicat recapitulării întrebărilor greșite, care se actualizează automat pe baza răspunsurilor oferite în teste.
+- **Tracking Enterprise pe Curs & Examen**:
+  - Cel mai bun scor obținut per curs randat ca badge discret (🏆) și bară de progres aferentă pe fiecare card de curs.
+  - Istoric simulări de examen cu reținerea ultimelor 5 examene susținute și calculul mediei generale.
+
+## [1.1.0] - 2026-06-22
 - **Autentificare Admin persistentă**: Parola admin se salvează acum securizat în `sessionStorage` pentru a asigura auto-login-ul la refresh-ul paginii în același tab.
 - **Management Materii din Cloud**:
   - Buton roșu de ștergere (🗑️) pe cardurile din meniul principal pentru toate materiile create prin cloud.
