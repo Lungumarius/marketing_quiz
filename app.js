@@ -179,6 +179,11 @@ async function init() {
   // Restore user session if saved
   await autoLogin();
   
+  // Enforce login and signup
+  if (!loggedInUser && !isAdmin) {
+    showAuthModal();
+  }
+  
   // Load stats for current subject if selected, otherwise general stats
   if (currentSubject) {
     loadStats();
@@ -302,10 +307,18 @@ function showAuthModal() {
   document.getElementById('authUsername').value = '';
   document.getElementById('authPassword').value = '';
   document.getElementById('authError').style.display = 'none';
+  
+  // Hide cancel button if not authenticated
+  const cancelBtn = document.querySelector('#authModal .modal-btns .btn-outline');
+  if (cancelBtn) {
+    cancelBtn.style.display = (loggedInUser || isAdmin) ? 'inline-block' : 'none';
+  }
+  
   switchAuthTab('signin');
 }
 
 function closeAuthModal() {
+  if (!loggedInUser && !isAdmin) return;
   document.getElementById('authModal').style.display = 'none';
 }
 
@@ -348,7 +361,8 @@ async function handleAuthSubmit(e) {
     } else {
       await signUp(user, pass);
     }
-    closeAuthModal();
+    // We can only close now since loggedInUser is populated
+    document.getElementById('authModal').style.display = 'none';
   } catch(err) {
     errorEl.textContent = err.message;
     errorEl.style.display = 'block';
@@ -356,7 +370,8 @@ async function handleAuthSubmit(e) {
 }
 
 function showAdminLogin() {
-  closeAuthModal();
+  // We don't close auth modal fully, just hide it so that if admin login is cancelled, it returns back.
+  document.getElementById('authModal').style.display = 'none';
   document.getElementById('pwdModal').style.display = 'flex';
   document.getElementById('pwdInput').value = '';
   document.getElementById('pwdError').style.display = 'none';
@@ -365,6 +380,9 @@ function showAdminLogin() {
 
 function closePwdModal() {
   document.getElementById('pwdModal').style.display = 'none';
+  if (!loggedInUser && !isAdmin) {
+    showAuthModal();
+  }
 }
 
 async function checkPassword() {
@@ -484,6 +502,8 @@ function logOut() {
   document.getElementById('home').style.display = 'none';
   document.getElementById('quizArea').style.display = 'none';
   document.getElementById('subjectPicker').style.display = 'block';
+  
+  showAuthModal();
 }
 
 async function autoLogin() {
@@ -946,17 +966,31 @@ function renderHome() {
     totalQ += course.questions.length; totalC++;
     const multi = course.questions.some(q=>Array.isArray(q.correct)&&q.correct.length>1);
     
-    const courseProg = coursesProgress[id] || { bestPct: 0, lastPct: 0 };
-    const scoreHtml = courseProg.bestPct > 0 
-      ? `<div class="course-score" style="font-size: 0.72rem; color: var(--accent2); margin-top: 4px; font-weight:700;">🏆 Cel mai bun scor: ${courseProg.bestPct}% ${courseProg.bestPct === 100 ? '✅' : ''}</div>`
-      : '';
+    const courseProg = coursesProgress[id] || { bestPct: 0, lastPct: 0, currentProgressPct: 0 };
+    
+    let scoreHtml = '';
+    let progressPct = 0;
+    let progressBarClass = 'course-progress-fill';
+    
+    if (courseProg.resumeState && Object.keys(courseProg.resumeState.answers).length > 0) {
+      const totalQCount = courseProg.resumeState.currentQuestions.length;
+      const answeredQCount = Object.keys(courseProg.resumeState.answers).length;
+      const currentPct = totalQCount > 0 ? Math.round((answeredQCount / totalQCount) * 100) : 0;
+      
+      scoreHtml = `<div class="course-score" style="font-size: 0.72rem; color: var(--orange); margin-top: 4px; font-weight:700;">⏳ În derulare: ${currentPct}%</div>`;
+      progressPct = currentPct;
+      progressBarClass = 'course-progress-fill in-progress';
+    } else if (courseProg.bestPct > 0) {
+      scoreHtml = `<div class="course-score" style="font-size: 0.72rem; color: var(--accent2); margin-top: 4px; font-weight:700;">🏆 Cel mai bun scor: ${courseProg.bestPct}% ${courseProg.bestPct === 100 ? '✅' : ''}</div>`;
+      progressPct = courseProg.bestPct;
+    }
       
     grid.innerHTML += `<div class="course-card" onclick="startCourse('${id}')">
       <div class="course-num">Curs ${id}</div>
       <div class="course-title">${course.name}</div>
       <div class="course-count">${course.questions.length} întrebări${multi?' (inclusiv răspunsuri multiple)':''}</div>
       ${scoreHtml}
-      <div class="course-progress" style="margin-top: 10px;"><div class="course-progress-fill" style="width:${courseProg.bestPct || 0}%"></div></div>
+      <div class="course-progress" style="margin-top: 10px;"><div class="${progressBarClass}" style="width:${progressPct}%"></div></div>
     </div>`;
   }
   
@@ -1085,6 +1119,27 @@ function startRecapitulare() {
 // ---- Quiz Logic ----
 function startCourse(id) {
   currentCourseId = id;
+  const courseProg = (stats.courses && stats.courses[id]) ? stats.courses[id] : null;
+  
+  if (courseProg && courseProg.resumeState && Object.keys(courseProg.resumeState.answers).length > 0) {
+    const totalQ = courseProg.resumeState.currentQuestions.length;
+    const answeredQ = Object.keys(courseProg.resumeState.answers).length;
+    const progressPercent = Math.round((answeredQ / totalQ) * 100);
+    
+    const wantResume = confirm(`Ai un test în derulare pe acest curs (${progressPercent}% finalizat). Vrei să îl continui de unde ai rămas?`);
+    if (wantResume) {
+      const state = courseProg.resumeState;
+      currentQuestions = state.currentQuestions;
+      currentIndex = state.currentIndex;
+      answers = state.answers;
+      confirmed = state.confirmed;
+      document.getElementById('quizTitle').textContent = currentCourses[id].name;
+      showQuiz();
+      showQuestion();
+      return;
+    }
+  }
+  
   currentQuestions = [...currentCourses[id].questions];
   currentIndex=0; answers={}; confirmed={};
   document.getElementById('quizTitle').textContent = currentCourses[id].name;
@@ -1150,6 +1205,7 @@ function toggleOpt(qId,L) {
   if(!answers[qId])answers[qId]=[];
   if(isMulti){const i=answers[qId].indexOf(L);if(i>=0)answers[qId].splice(i,1);else answers[qId].push(L);showQuestion();}
   else{answers[qId]=[L];confirmAns(qId);}
+  saveCourseProgressState();
 }
 
 function confirmAns(qId) {
@@ -1180,18 +1236,40 @@ function confirmAns(qId) {
     if (!stats.wrongQuestions) stats.wrongQuestions = [];
     if (!stats.wrongQuestions.some(x => x.id === qId)) {
       const cleanQ = { ...q };
-      delete cleanQ.parentSubjectKey; // Remove any temp recap parent link
+      delete cleanQ.parentSubjectKey;
       stats.wrongQuestions.push(cleanQ);
     }
   }
   
   saveStats();
+  saveCourseProgressState();
   if(mode==='learn')showQuestion();
   else{document.querySelectorAll('.option').forEach(o=>{o.classList.add('disabled');if(sel.includes(o.dataset.letter))o.classList.add('selected');});document.querySelector('.confirm-btn')?.classList.remove('show');}
 }
 
-function nextQ(){if(currentIndex<currentQuestions.length-1){currentIndex++;showQuestion();}else showResults();}
-function prevQ(){if(currentIndex>0){currentIndex--;showQuestion();}}
+function nextQ(){if(currentIndex<currentQuestions.length-1){currentIndex++;saveCourseProgressState();showQuestion();}else showResults();}
+function prevQ(){if(currentIndex>0){currentIndex--;saveCourseProgressState();showQuestion();}}
+
+function saveCourseProgressState() {
+  if (currentSubject === 'recap' || currentCourseId === 'all' || !currentCourseId) return;
+  if (!stats.courses) stats.courses = {};
+  if (!stats.courses[currentCourseId]) {
+    stats.courses[currentCourseId] = { bestPct: 0, lastPct: 0 };
+  }
+  
+  stats.courses[currentCourseId].resumeState = {
+    currentIndex: currentIndex,
+    answers: answers,
+    confirmed: confirmed,
+    currentQuestions: currentQuestions
+  };
+  
+  const totalQuestions = currentQuestions.length;
+  const completedQuestions = Object.keys(answers).length;
+  stats.courses[currentCourseId].currentProgressPct = totalQuestions > 0 ? Math.round((completedQuestions / totalQuestions) * 100) : 0;
+  
+  saveStats();
+}
 
 function showResults() {
   let ok=0;
@@ -1212,6 +1290,10 @@ function showResults() {
       stats.courses[currentCourseId].lastPct = pct;
       stats.courses[currentCourseId].bestPct = Math.max(stats.courses[currentCourseId].bestPct || 0, pct);
       stats.courses[currentCourseId].completed = (stats.courses[currentCourseId].bestPct === 100);
+      
+      // Clean up resumeState as the quiz has been completed
+      delete stats.courses[currentCourseId].resumeState;
+      stats.courses[currentCourseId].currentProgressPct = 0;
     }
     
     saveStats();
@@ -1225,6 +1307,9 @@ function showResults() {
 }
 
 function retry(){currentIndex=0;answers={};confirmed={};shuffle(currentQuestions);
+  if (currentCourseId && currentCourseId !== 'all' && currentSubject !== 'recap') {
+    saveCourseProgressState();
+  }
   document.getElementById('results').style.display='none';document.getElementById('navButtons').style.display='flex';
   document.getElementById('questionContainer').style.display='block';showQuestion();}
 

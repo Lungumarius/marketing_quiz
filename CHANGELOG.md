@@ -10,10 +10,12 @@ Toate modificările structurale, funcționalitățile adăugate și problemele r
   - Derivare cheie de decriptare cu PBKDF2 (100k iterații, salt unic).
   - Criptare AES-GCM 256-bit pentru datele trimise în JSONBin.
   - Sesiune utilizator memorată securizat.
+  - **Forțare Conectare (Enforced Login)**: Aplicația forțează autentificarea la pornire și după deconectare, blocând accesul la dashboard până când utilizatorul este logat ca student sau admin.
 - **Mape private de materii**: Opțiune pentru studenții conectați să uploadeze materii în cloud securizat, vizibile doar în contul lor propriu.
 - **Recapitulare Inteligentă**: Card dedicat recapitulării întrebărilor greșite, care se actualizează automat pe baza răspunsurilor oferite în teste.
-- **Tracking Enterprise pe Curs & Examen**:
-  - Cel mai bun scor obținut per curs randat ca badge discret (🏆) și bară de progres aferentă pe fiecare card de curs.
+- **Tracking Enterprise pe Curs & Examen & Salvare Stare**:
+  - **Salvare stare test curent & Resume**: Fiecare opțiune selectată sau confirmare de răspuns este salvată securizat sub nodul `resumeState` din cloud. La redeschiderea unui curs neterminat, studentul este întrebat dacă dorește reluarea testului de unde a rămas.
+  - Cel mai bun scor obținut per curs randat ca badge discret (🏆) și bară de progres aferentă pe fiecare card de curs. Pentru testele în derulare, bara de progres devine portocalie și indică procentul de progres curent.
   - Istoric simulări de examen cu reținerea ultimelor 5 examene susținute și calculul mediei generale.
 
 ## [1.1.0] - 2026-06-22
